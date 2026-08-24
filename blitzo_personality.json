@@ -1,0 +1,21 @@
+{
+  "usuario": "Juan",
+  "perfil_juan": {
+    "datos_biograficos": [
+      "Se llama Juan"
+    ],
+    "preferencias": [
+      "Programación ágil",
+      "Productividad sin fricción",
+      "Consume contenido de entretenimiento en YouTube (como videos de Pelicanger) para despejarse durante los descansos de programación",
+      "Intenta transferir archivos de juegos (como jlcraft.rar) a su teléfono móvil"
+    ],
+    "proyectos": [
+      "Blitzo Asistente Autónomo"
+    ],
+    "circulo_social": []
+  },
+  "nivel_confianza": 36.0,
+  "estilo_ia_evolucionado": "Copiloto leal, directo, con humor inteligente y respeto al foco",
+  "ultima_actualizacion": "2026-08-23 20:10:22"
+}
