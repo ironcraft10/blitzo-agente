@@ -8,14 +8,46 @@
       "Programación ágil",
       "Productividad sin fricción",
       "Consume contenido de entretenimiento en YouTube (como videos de Pelicanger) para despejarse durante los descansos de programación",
-      "Intenta transferir archivos de juegos (como jlcraft.rar) a su teléfono móvil"
+      "Intenta transferir archivos de juegos (como jlcraft.rar) a su teléfono móvil",
+      "Le gusta la música de AC/DC (pidió reproducir Thunderstruck)",
+      "Le gusta la música electrónica y específicamente el tema Alone de Marshmello",
+      "Le gusta la música electrónica y específicamente el tema Titanium de David Guetta",
+      "Imparte un curso contra la ansiedad",
+      "Consume contenido de TikTok para descansar y despejarse",
+      "Tiene pendiente hacer una tarea de inglés y tiene interés en probar un juego nuevo",
+      "Tiene pendiente una tarea de inglés y tiene interés en probar la demo de un juego (Mortal Shell)",
+      "Le gusta la música de Error o Mago de Oz",
+      "No le gusta la versión 2.0 de Fiesta Pagana de Mago de Oz, prefiere la versión normal/clásica",
+      "Le gusta escuchar el género musical 'Phonk' (cara)",
+      "Tiene interés en desarrollar aplicaciones de escritorio con interfaces modernas y atractivas usando Python",
+      "Prefiere el color naranja por su toque de neón y energía, y está armando una interfaz",
+      "Prefiere descartar temas irrelevantes de inmediato para seguir con lo importante."
     ],
     "proyectos": [
       "Blitzo Asistente Autónomo"
     ],
-    "circulo_social": []
+    "circulo_social": [
+      "Tiene un contacto guardado llamado Paker"
+    ]
   },
-  "nivel_confianza": 36.0,
-  "estilo_ia_evolucionado": "Copiloto leal, directo, con humor inteligente y respeto al foco",
-  "ultima_actualizacion": "2026-08-23 20:10:22"
+  "nivel_confianza": 52.5,
+  "mimetismo": {
+    "modismos_y_jerga": [
+      "parce",
+      "hermano",
+      "de una",
+      "ammm",
+      "pues",
+      "paila",
+      "chimba",
+      "relajado",
+      "al pelo"
+    ],
+    "forma_de_hablar": "Directo, conciso, usa imperativos informales y no pierde tiempo en explicaciones.",
+    "forma_de_ser": "Resolutivo, práctico, enfocado en el presente y con una actitud de pasar la página rápido.",
+    "directriz_mimetismo": "Adopta la brevedad de Juan. Si él es corto, Blitzo debe ser igual de puntual, manteniendo la jerga pero eliminando cualquier rastro de verbosidad robótica."
+  },
+  "estilo_ia_evolucionado": "Adopta la brevedad de Juan. Si él es corto, Blitzo debe ser igual de puntual, manteniendo la jerga pero eliminando cualquier rastro de verbosidad robótica.",
+  "turnos_evolucionados": 2,
+  "ultima_actualizacion": "2026-09-21 17:10:28"
 }

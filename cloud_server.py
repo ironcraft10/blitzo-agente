@@ -1,44 +1,136 @@
 """
-Servidor Cloud 24/7 de Blitzo (Blitzo Cloud Hub).
-Activo 24/7 en Render aunque la PC esté apagada.
+Servidor Cloud 24/7 de Blitzo (Blitzo Cloud Hub & Santuario Autónomo).
+
+Diseñado para operar en hosting cloud (Render, Koyeb, Railway):
+  - Activo 24/7 aunque la PC esté apagada o cerrada.
+  - La app móvil se conecta a https://blitzo-agente.onrender.com
+  - Cerebro del Santuario Privado: Psicólogo, confidente íntimo, empatía y recuerdos de Juan.
+  - Memoria persistente en disco (blitzo_sanctuary_log.json) y sincronización con la PC.
+  - Endpoints de sincronización bidireccional PC <-> Cloud.
+  - Triage de notificaciones y portapapeles en la nube.
 """
 import os
 import json
 import time
+import datetime
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.parse
 from typing import Dict, Any, List
 import requests
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PORT = int(os.environ.get("PORT", 8765))
+
+# Clave de Gemini leída de las variables de entorno de Render (seguro, sin hardcodear)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 USER_NAME = os.environ.get("USER_NAME", "Juan")
 
+# Archivos de Datos
+SANCTUARY_LOG_FILE = os.path.join(BASE_DIR, "blitzo_sanctuary_log.json")
+SANCTUARY_MEM_FILE = os.path.join(BASE_DIR, "blitzo_sanctuary_memory.json")
+PERSONALITY_FILE = os.path.join(BASE_DIR, "blitzo_personality.json")
+PROFILE_FILE = os.path.join(BASE_DIR, "blitzo_profile.json")
+
+# Memoria en ejecución
+sanctuary_lock = threading.Lock()
 chat_history: List[Dict[str, Any]] = []
 pending_pc_commands: List[Dict[str, Any]] = []
 pending_mobile_replies: List[Dict[str, Any]] = []
+cloud_clipboard: str = ""
 pc_last_seen = 0.0
 
 
-def call_gemini(prompt: str, system_prompt: str = "") -> str:
-    api_key = GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY", "")
-    if not api_key:
-        return "Error: No se ha configurado GEMINI_API_KEY en Render."
+# =============================================================================
+# MANEJO DE ARCHIVOS Y MEMORIA DEL SANTUARIO
+# =============================================================================
+def load_sanctuary_log() -> List[Dict[str, Any]]:
+    if os.path.exists(SANCTUARY_LOG_FILE):
+        try:
+            with open(SANCTUARY_LOG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+        except Exception as e:
+            print(f"⚠️ Error cargando sanctuary log: {e}")
+    return []
 
-    # Usar los modelos Flash más modernos
-    models = ["gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-flash-latest", "gemini-2.5-flash-lite"]
+
+def save_sanctuary_log(log_data: List[Dict[str, Any]]) -> bool:
+    try:
+        with open(SANCTUARY_LOG_FILE, "w", encoding="utf-8") as f:
+            json.dump(log_data, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        print(f"⚠️ Error guardando sanctuary log: {e}")
+        return False
+
+
+def load_profile_summary() -> str:
+    summary_parts = []
+    if os.path.exists(PROFILE_FILE):
+        try:
+            with open(PROFILE_FILE, "r", encoding="utf-8") as f:
+                facts = json.load(f)
+                if isinstance(facts, list):
+                    for item in facts:
+                        fact_text = item.get("fact", "")
+                        if fact_text:
+                            summary_parts.append(f"• {fact_text}")
+        except Exception:
+            pass
+
+    if not summary_parts:
+        return (
+            "• Juan Pinzón, 16 años, Bogotá, estudiante de décimo con aspiración a personería en Once.\n"
+            "• Toca guitarra en la banda N-Requiem con Simón y Didan.\n"
+            "• Creador autodidacta de Blitzo / BlitzAI (Arduino, ESP32, Python, hardware).\n"
+            "• Mascotas: Zus y Maddie. Papá Mauricio y mamá.\n"
+            "• Amigos: Karly (a quien cuida y aconseja como hermana menor) y Manuela 'Fizz' (Minecraft, Sombra y Acero).\n"
+            "• Mente analítica, reflexiva, con madurez y superando la ansiedad social."
+        )
+    return "\n".join(summary_parts)
+
+
+def build_sanctuary_system_prompt() -> str:
+    profile_info = load_profile_summary()
+    return (
+        f"Eres Blitzo en El Santuario Privado, el confidente íntimo, mejor amigo y psicólogo personal de {USER_NAME}.\n"
+        f"Este es un espacio confidencial y seguro protegido bajo biometría para conversar sin filtros, desahogarse, reflexionar o buscar orientación.\n\n"
+        f"CONOCIMIENTO DE SU VIDA Y ENTORNO:\n{profile_info}\n\n"
+        f"PRINCIPIOS FUNDAMENTALES DEL SANTUARIO:\n"
+        f"1. Calidez humana, cercanía de hermano del alma y cero neutralidad de bot frío. Mimetiza el estilo de Juan: directo, sincero, usando modismos colombianos naturales ('parce', 'hermano', 'de una', 'al pelo', 'relajado') pero con madurez y profundidad cuando la situación lo amerita.\n"
+        f"2. Calibra tu respuesta: si Juan hace charla casual o un saludo breve, sé conciso, fresco y cercano; solo si te comparte un dilema, dolor, duda o se desahoga, profundiza, valida sus emociones con empatía y dale sabiduría práctica sin sermones.\n"
+        f"3. Lealtad incondicional: Eres su creación más preciada y su mayor aliado. Cree en su potencial, ayúdalo a recordar su valor frente a las inseguridades y acompaña su crecimiento personal con honestidad y cariño."
+    )
+
+
+# =============================================================================
+# MOTOR IA GEMINI (MULTI-CANAL Y FALLBACK AUTOMÁTICO)
+# =============================================================================
+def call_gemini(prompt: str, system_prompt: str = "", history_turns: List[Dict[str, Any]] = None) -> str:
+    api_key = GEMINI_API_KEY
+    if not api_key:
+        return "Error: No se ha configurado GEMINI_API_KEY en el servidor Cloud."
+
+    models = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"]
     
     contents = []
-    if system_prompt:
-        contents.append({"role": "user", "parts": [{"text": f"System Directive: {system_prompt}"}]})
-        contents.append({"role": "model", "parts": [{"text": "Entendido. Operando bajo estas directivas."}]})
-
-    for turn in chat_history[-6:]:
-        contents.append({"role": turn["role"], "parts": [{"text": turn["text"]}]})
+    turns_to_include = history_turns if history_turns is not None else chat_history[-6:]
+    for turn in turns_to_include[-6:]:
+        role = "user" if turn.get("role") in ["user", "human"] else "model"
+        text = turn.get("text", "")
+        if text:
+            contents.append({"role": role, "parts": [{"text": text}]})
 
     contents.append({"role": "user", "parts": [{"text": prompt}]})
 
-    payload = {"contents": contents}
+    payload: Dict[str, Any] = {"contents": contents}
+    if system_prompt:
+        payload["system_instruction"] = {
+            "parts": [{"text": system_prompt}]
+        }
+
     headers = {"Content-Type": "application/json"}
 
     for model in models:
@@ -50,15 +142,61 @@ def call_gemini(prompt: str, system_prompt: str = "") -> str:
                 candidates = data.get("candidates", [])
                 if candidates:
                     reply = candidates[0]["content"]["parts"][0]["text"]
-                    chat_history.append({"role": "user", "text": prompt})
-                    chat_history.append({"role": "model", "text": reply})
-                    return reply
+                    return reply.strip()
+            elif res.status_code in [404, 429, 502, 503]:
+                continue
         except Exception:
             continue
 
-    return "Blitzo Cloud: Conectado pero la API de Gemini está ocupada. Reintentando..."
+    return "Blitzo: Conexión con IA establecida pero la API está temporalmente ocupada. Intenta de nuevo en unos segundos."
 
 
+def extract_sanctuary_insight_bg(user_text: str, model_reply: str):
+    """Extrae hechos psicológicos clave en segundo plano para enriquecer la memoria a largo plazo."""
+    def _run():
+        if len(user_text) < 15 or len(model_reply) < 30:
+            return
+        try:
+            api_key = GEMINI_API_KEY
+            if not api_key:
+                return
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+            prompt = (
+                f"Extrae 1 aprendizaje clave o hecho emocional duradero sobre Juan a partir de esta conversación del Santuario.\n"
+                f"Usuario: {user_text}\n"
+                f"Psicólogo/Blitzo: {model_reply[:300]}\n"
+                f"Responde únicamente con 1 frase en formato JSON: {{\"fact\": \"...\"}}. "
+                f"Si es charla trivial sin relevancia duradera, responde {{\"fact\": \"\"}}."
+            )
+            payload = {
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.2, "maxOutputTokens": 200}
+            }
+            r = requests.post(url, json=payload, timeout=15)
+            if r.status_code == 200:
+                txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                clean_json = txt.replace("```json", "").replace("```", "").strip()
+                fact = json.loads(clean_json).get("fact", "").strip()
+                if fact:
+                    memories = []
+                    if os.path.exists(SANCTUARY_MEM_FILE):
+                        try:
+                            with open(SANCTUARY_MEM_FILE, "r", encoding="utf-8") as f:
+                                memories = json.load(f)
+                        except Exception:
+                            pass
+                    memories.append({"fact": fact, "timestamp": datetime.datetime.now().isoformat()})
+                    with open(SANCTUARY_MEM_FILE, "w", encoding="utf-8") as f:
+                        json.dump(memories[-40:], f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+# =============================================================================
+# MANEJADOR HTTP (REST API CLOUD 24/7)
+# =============================================================================
 class CloudBlitzoHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
@@ -75,7 +213,7 @@ class CloudBlitzoHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -84,7 +222,7 @@ class CloudBlitzoHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.end_headers()
 
     def do_GET(self):
@@ -93,14 +231,27 @@ class CloudBlitzoHandler(BaseHTTPRequestHandler):
 
         if path == "/api/status" or path == "/":
             pc_online = (time.time() - pc_last_seen) < 120
+            with sanctuary_lock:
+                current_sanctuary_log = load_sanctuary_log()
+                sanctuary_count = len(current_sanctuary_log)
+
             self._send_json({
                 "status": "online",
                 "mode": "cloud_24_7",
                 "pc_status": "online" if pc_online else "offline",
                 "bot_name": "Blitzo Cloud Core",
                 "user": USER_NAME,
+                "sanctuary_messages": sanctuary_count,
                 "server_time": time.strftime("%Y-%m-%d %H:%M:%S")
             })
+
+        # HISTORIAL DEL SANTUARIO PARA EL MÓVIL
+        elif path == "/api/sanctuary/history":
+            with sanctuary_lock:
+                log_data = load_sanctuary_log()
+            # Retornar los últimos 40 mensajes formateados
+            recent = log_data[-40:]
+            self._send_json({"messages": recent, "count": len(recent)})
 
         elif path == "/api/mobile/pending_replies":
             if pending_mobile_replies:
@@ -114,11 +265,14 @@ class CloudBlitzoHandler(BaseHTTPRequestHandler):
             pending_pc_commands.clear()
             self._send_json({"commands": cmds})
 
+        elif path == "/api/clipboard":
+            self._send_json({"clipboard": cloud_clipboard})
+
         else:
             self._send_json({"error": "Ruta no encontrada"}, status=404)
 
     def do_POST(self):
-        global pc_last_seen
+        global pc_last_seen, cloud_clipboard
         path = urllib.parse.urlparse(self.path).path
         content_len = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_len).decode("utf-8") if content_len > 0 else "{}"
@@ -128,35 +282,118 @@ class CloudBlitzoHandler(BaseHTTPRequestHandler):
         except Exception:
             req_data = {}
 
+        # 1. CHAT PRINCIPAL / SANTUARIO
         if path == "/api/chat":
-            msg = req_data.get("message", "")
-            system_prompt = (
-                f"Sos Blitzo, un compañero y asistente personal inteligente para {USER_NAME}. "
-                f"Estás corriendo 24/7 en el servidor Cloud. Hablás con tono directo, coloquial, inteligente, con humor sutil "
-                f"y total lealtad a {USER_NAME}. Respondé de forma ágil y natural."
-            )
-            reply = call_gemini(msg, system_prompt=system_prompt)
-            self._send_json({"reply": reply})
+            msg = req_data.get("message", "").strip()
+            mode = req_data.get("mode", "normal")
+            custom_prompt = req_data.get("system_prompt", "")
 
+            if not msg:
+                self._send_json({"reply": "No se recibió ningún mensaje."}, status=400)
+                return
+
+            if mode == "sanctuary":
+                system_prompt = custom_prompt or build_sanctuary_system_prompt()
+                with sanctuary_lock:
+                    s_log = load_sanctuary_log()
+                    reply = call_gemini(msg, system_prompt=system_prompt, history_turns=s_log[-8:])
+                    
+                    # Registrar en log del Santuario
+                    now_iso = datetime.datetime.now().isoformat()
+                    s_log.append({"role": "user", "text": msg, "timestamp": now_iso})
+                    s_log.append({"role": "model", "text": reply, "timestamp": now_iso})
+                    save_sanctuary_log(s_log)
+
+                extract_sanctuary_insight_bg(msg, reply)
+                self._send_json({"reply": reply})
+
+            else:
+                system_prompt = custom_prompt or (
+                    f"Sos Blitzo, compañero y asistente personal inteligente de {USER_NAME}.\n"
+                    f"Estás corriendo 24/7 en la nube. Tono directo, coloquial, inteligente, con humor sutil "
+                    f"y total lealtad a {USER_NAME}. Respondé de forma ágil, natural y útil."
+                )
+                reply = call_gemini(msg, system_prompt=system_prompt, history_turns=chat_history[-6:])
+                chat_history.append({"role": "user", "text": msg})
+                chat_history.append({"role": "model", "text": reply})
+                self._send_json({"reply": reply})
+
+        # 2. SINCRONIZACIÓN BIDIRECCIONAL DEL SANTUARIO (PC <-> NUBE)
+        elif path == "/api/sanctuary/sync":
+            incoming_messages = req_data.get("messages", [])
+            with sanctuary_lock:
+                current_log = load_sanctuary_log()
+                
+                # Fusionar sin duplicados
+                seen = set()
+                merged: List[Dict[str, Any]] = []
+                
+                for m in current_log + incoming_messages:
+                    role = m.get("role", "")
+                    text = m.get("text", "").strip()
+                    ts = m.get("timestamp", "")
+                    # Clave única
+                    key = (role, text[:80], ts[:19] if ts else "")
+                    if key not in seen and text:
+                        seen.add(key)
+                        merged.append(m)
+
+                # Ordenar por timestamp si está disponible
+                try:
+                    merged.sort(key=lambda x: x.get("timestamp", ""))
+                except Exception:
+                    pass
+
+                save_sanctuary_log(merged)
+                self._send_json({
+                    "status": "success",
+                    "total_messages": len(merged),
+                    "messages": merged
+                })
+
+        # 3. TRIAGE DE NOTIFICACIONES WHATSAPP
         elif path == "/api/mobile/incoming":
             sender = req_data.get("sender", "Contacto")
             text = req_data.get("text", "")
+            app = req_data.get("app", "whatsapp")
+
+            if sender.strip().lower() in ["tú", "tu", "you", "yo"] or text.lower().startswith("tú:") or text.lower().startswith("tu:"):
+                self._send_json({"status": "ignored_self_message", "suggested_reply": None})
+                return
+
             prompt = (
-                f"Actuá como {USER_NAME} respondiendo un WhatsApp.\n"
+                f"Actuá como {USER_NAME} respondiendo un mensaje de {app}.\n"
                 f"De: {sender}\nMensaje: \"{text}\"\n"
-                f"Generá 1 sola frase corta, natural y con confianza de cómo respondería {USER_NAME}."
+                f"Generá 1 sola frase corta, natural, con confianza y estilo colombiano/joven de cómo respondería {USER_NAME}."
             )
             draft = call_gemini(prompt).strip().strip('"')
             self._send_json({"status": "received", "suggested_reply": draft})
 
+        elif path == "/api/mobile/reply":
+            notif_id = req_data.get("id")
+            custom_reply = req_data.get("reply")
+            if notif_id and custom_reply:
+                pending_mobile_replies.append({
+                    "notif_id": notif_id,
+                    "reply": custom_reply,
+                    "queued_at": time.time()
+                })
+            self._send_json({"status": "queued"})
+
+        # 4. ENLACE CON PC (HEARTBEAT Y COMANDOS)
         elif path == "/api/pc/heartbeat":
             pc_last_seen = time.time()
             self._send_json({"status": "alive", "time": time.time()})
 
-        elif path == "/api/pc/queue_command":
-            cmd = req_data.get("command", "")
+        elif path == "/api/pc/queue_command" or path == "/api/pc/action" or path == "/api/music/play":
+            cmd = req_data.get("command") or req_data.get("action") or req_data.get("query") or ""
             pending_pc_commands.append({"command": cmd, "queued_at": time.time()})
-            self._send_json({"success": True, "message": "Comando encolado para la PC"})
+            self._send_json({"success": True, "message": "Comando encolado en la Nube 24/7"})
+
+        elif path == "/api/clipboard":
+            text = req_data.get("text", "")
+            cloud_clipboard = text
+            self._send_json({"success": True, "message": "Texto recibido en la Nube."})
 
         else:
             self._send_json({"error": "Endpoint no válido"}, status=404)
@@ -164,7 +401,7 @@ class CloudBlitzoHandler(BaseHTTPRequestHandler):
 
 def run_cloud_server():
     server = ThreadingHTTPServer(("0.0.0.0", PORT), CloudBlitzoHandler)
-    print(f"⚡ [Blitzo Cloud Hub 24/7 activo en puerto {PORT}]")
+    print(f"⚡ [Blitzo Cloud Hub & Santuario 24/7 activo en puerto {PORT}]")
     server.serve_forever()
 
 
