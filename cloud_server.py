@@ -90,6 +90,28 @@ def save_sanctuary_log(log_data: List[Dict[str, Any]]) -> bool:
         return False
 
 
+def load_saved_chats() -> List[Dict[str, Any]]:
+    if os.path.exists(SAVED_CHATS_FILE):
+        try:
+            with open(SAVED_CHATS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+        except Exception as e:
+            print(f"⚠️ Error cargando saved chats: {e}")
+    return []
+
+
+def save_saved_chats(chats_data: List[Dict[str, Any]]) -> bool:
+    try:
+        with open(SAVED_CHATS_FILE, "w", encoding="utf-8") as f:
+            json.dump(chats_data, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        print(f"⚠️ Error guardando saved chats: {e}")
+        return False
+
+
 def load_profile_summary() -> str:
     summary_parts = []
     if os.path.exists(PROFILE_FILE):
@@ -277,6 +299,19 @@ class CloudBlitzoHandler(BaseHTTPRequestHandler):
             recent = log_data[-40:]
             self._send_json({"messages": recent, "count": len(recent)})
 
+        # HISTORIAL DE CHATS GUARDADOS
+        elif path == "/api/saved_chats":
+            with saved_chats_lock:
+                chats = load_saved_chats()
+            # Aplanar mensajes para clientes móviles si lo requieren
+            flat = []
+            for item in chats:
+                if isinstance(item, dict) and "messages" in item:
+                    flat.extend(item.get("messages", []))
+                elif isinstance(item, dict) and "text" in item:
+                    flat.append(item)
+            self._send_json({"messages": flat, "sessions": chats, "count": len(flat)})
+
         elif path == "/api/mobile/pending_replies":
             if pending_mobile_replies:
                 rep = pending_mobile_replies.pop(0)
@@ -373,6 +408,89 @@ class CloudBlitzoHandler(BaseHTTPRequestHandler):
                     "status": "success",
                     "total_messages": len(merged),
                     "messages": merged
+                })
+
+        # 3. SINCRONIZACIÓN DE CHATS GUARDADOS (Soporta sesiones completas de PC y mensajes individuales)
+        elif path == "/api/saved_chats/sync":
+            incoming = req_data.get("messages", []) or req_data.get("sessions", [])
+            with saved_chats_lock:
+                current_log = load_saved_chats()
+                
+                # Si existen sesiones con estructura (id, title, messages)
+                has_sessions = any(isinstance(x, dict) and "id" in x for x in (current_log + incoming))
+                if has_sessions:
+                    session_map = {}
+                    for item in current_log:
+                        if isinstance(item, dict) and "id" in item:
+                            session_map[item["id"]] = item
+                        elif isinstance(item, dict) and "text" in item:
+                            session_map.setdefault("global_session", {
+                                "id": "global_session",
+                                "title": "Historial General",
+                                "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                "count": 0,
+                                "messages": []
+                            })
+                            session_map["global_session"]["messages"].append(item)
+
+                    for item in incoming:
+                        if isinstance(item, dict) and "id" in item:
+                            sid = item["id"]
+                            if sid in session_map:
+                                exist_msgs = session_map[sid].get("messages", [])
+                                seen_k = {(m.get("role",""), m.get("text","").strip(), m.get("timestamp","")[:19]) for m in exist_msgs if isinstance(m, dict)}
+                                for m in item.get("messages", []):
+                                    k = (m.get("role",""), m.get("text","").strip(), m.get("timestamp","")[:19])
+                                    if k not in seen_k and m.get("text"):
+                                        seen_k.add(k)
+                                        exist_msgs.append(m)
+                                session_map[sid]["messages"] = exist_msgs
+                                session_map[sid]["count"] = len(exist_msgs)
+                            else:
+                                session_map[sid] = item
+                        elif isinstance(item, dict) and "text" in item:
+                            # Mensaje individual desde móvil
+                            session_map.setdefault("mobile_live_session", {
+                                "id": "mobile_live_session",
+                                "title": "Chat Móvil Guardado",
+                                "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                "count": 0,
+                                "messages": []
+                            })
+                            exist_msgs = session_map["mobile_live_session"]["messages"]
+                            seen_k = {(m.get("role",""), m.get("text","").strip(), m.get("timestamp","")[:19]) for m in exist_msgs if isinstance(m, dict)}
+                            k = (item.get("role",""), item.get("text","").strip(), item.get("timestamp","")[:19])
+                            if k not in seen_k and item.get("text"):
+                                seen_k.add(k)
+                                exist_msgs.append(item)
+                            session_map["mobile_live_session"]["count"] = len(exist_msgs)
+
+                    merged_saved = list(session_map.values())
+                else:
+                    seen = set()
+                    merged_saved = []
+                    for m in current_log + incoming:
+                        if isinstance(m, dict):
+                            key = (m.get("role", ""), m.get("text", "").strip(), m.get("timestamp", "")[:19])
+                            if key not in seen and m.get("text"):
+                                seen.add(key)
+                                merged_saved.append(m)
+
+                save_saved_chats(merged_saved)
+
+                # Aplanar mensajes para compatibilidad inmediata con la app móvil
+                flat = []
+                for item in merged_saved:
+                    if isinstance(item, dict) and "messages" in item:
+                        flat.extend(item.get("messages", []))
+                    elif isinstance(item, dict) and "text" in item:
+                        flat.append(item)
+
+                self._send_json({
+                    "status": "success",
+                    "total_messages": len(flat),
+                    "messages": flat,
+                    "sessions": merged_saved
                 })
 
         # 3. TRIAGE DE NOTIFICACIONES WHATSAPP
