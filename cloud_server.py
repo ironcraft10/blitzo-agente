@@ -388,14 +388,16 @@ class CloudBlitzoHandler(BaseHTTPRequestHandler):
                 merged: List[Dict[str, Any]] = []
                 
                 for m in current_log + incoming_messages:
-                    role = m.get("role", "")
-                    text = m.get("text", "").strip()
-                    ts = m.get("timestamp", "")
-                    # Clave única
-                    key = (role, text[:80], ts[:19] if ts else "")
-                    if key not in seen and text:
-                        seen.add(key)
-                        merged.append(m)
+                    if isinstance(m, dict):
+                        role = m.get("role")
+                        if not role or role not in ["model", "assistant", "blitzo"]:
+                            role = "user"
+                        m["role"] = role
+                        text = m.get("text", "").strip()
+                        key = (role, text)
+                        if key not in seen and text:
+                            seen.add(key)
+                            merged.append(m)
 
                 # Ordenar por timestamp si está disponible
                 try:
