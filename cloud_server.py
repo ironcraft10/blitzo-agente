@@ -295,8 +295,20 @@ class CloudBlitzoHandler(BaseHTTPRequestHandler):
         elif path == "/api/sanctuary/history":
             with sanctuary_lock:
                 log_data = load_sanctuary_log()
-            # Retornar los últimos 40 mensajes formateados
-            recent = log_data[-40:]
+            # Retornar los últimos 40 mensajes formateados sin duplicados
+            clean_list = []
+            seen = set()
+            for m in log_data:
+                if isinstance(m, dict):
+                    raw_role = m.get("role")
+                    norm_role = "model" if raw_role in ["model", "assistant", "blitzo"] else "user"
+                    m["role"] = norm_role
+                    txt = (m.get("text") or "").strip()
+                    k = (norm_role, txt)
+                    if k not in seen and txt:
+                        seen.add(k)
+                        clean_list.append(m)
+            recent = clean_list[-40:]
             self._send_json({"messages": recent, "count": len(recent)})
 
         # HISTORIAL DE CHATS GUARDADOS
@@ -380,8 +392,9 @@ class CloudBlitzoHandler(BaseHTTPRequestHandler):
         # 2. SINCRONIZACIÓN BIDIRECCIONAL DEL SANTUARIO (PC <-> NUBE)
         elif path == "/api/sanctuary/sync":
             incoming_messages = req_data.get("messages", [])
+            overwrite = req_data.get("overwrite", False)
             with sanctuary_lock:
-                current_log = load_sanctuary_log()
+                current_log = [] if overwrite else load_sanctuary_log()
                 
                 # Fusionar sin duplicados
                 seen = set()
@@ -389,12 +402,11 @@ class CloudBlitzoHandler(BaseHTTPRequestHandler):
                 
                 for m in current_log + incoming_messages:
                     if isinstance(m, dict):
-                        role = m.get("role")
-                        if not role or role not in ["model", "assistant", "blitzo"]:
-                            role = "user"
-                        m["role"] = role
-                        text = m.get("text", "").strip()
-                        key = (role, text)
+                        raw_role = m.get("role")
+                        norm_role = "model" if raw_role in ["model", "assistant", "blitzo"] else "user"
+                        m["role"] = norm_role
+                        text = (m.get("text") or "").strip()
+                        key = (norm_role, text)
                         if key not in seen and text:
                             seen.add(key)
                             merged.append(m)
