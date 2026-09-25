@@ -29,11 +29,13 @@ USER_NAME = os.environ.get("USER_NAME", "Juan")
 # Archivos de Datos
 SANCTUARY_LOG_FILE = os.path.join(BASE_DIR, "blitzo_sanctuary_log.json")
 SANCTUARY_MEM_FILE = os.path.join(BASE_DIR, "blitzo_sanctuary_memory.json")
+SAVED_CHATS_FILE = os.path.join(BASE_DIR, "blitzo_saved_chats.json")
 PERSONALITY_FILE = os.path.join(BASE_DIR, "blitzo_personality.json")
 PROFILE_FILE = os.path.join(BASE_DIR, "blitzo_profile.json")
 
 # Memoria en ejecución
 sanctuary_lock = threading.Lock()
+saved_chats_lock = threading.Lock()
 chat_history: List[Dict[str, Any]] = []
 pending_pc_commands: List[Dict[str, Any]] = []
 pending_mobile_replies: List[Dict[str, Any]] = []
@@ -154,7 +156,7 @@ def build_sanctuary_system_prompt() -> str:
 # =============================================================================
 # MOTOR IA GEMINI (MULTI-CANAL Y FALLBACK AUTOMÁTICO)
 # =============================================================================
-def call_gemini(prompt: str, system_prompt: str = "", history_turns: List[Dict[str, Any]] = None) -> str:
+def call_gemini(prompt: str, system_prompt: str = "", history_turns: List[Dict[str, Any]] = None, file_data: str = None, mime_type: str = None) -> str:
     api_key = GEMINI_API_KEY
     if not api_key:
         return "Error: No se ha configurado GEMINI_API_KEY en el servidor Cloud."
@@ -169,7 +171,17 @@ def call_gemini(prompt: str, system_prompt: str = "", history_turns: List[Dict[s
         if text:
             contents.append({"role": role, "parts": [{"text": text}]})
 
-    contents.append({"role": "user", "parts": [{"text": prompt}]})
+    user_parts = []
+    if file_data and mime_type:
+        user_parts.append({
+            "inline_data": {
+                "mime_type": mime_type,
+                "data": file_data
+            }
+        })
+    user_parts.append({"text": prompt or "Analiza este archivo adjunto."})
+
+    contents.append({"role": "user", "parts": user_parts})
 
     payload: Dict[str, Any] = {"contents": contents}
     if system_prompt:
@@ -193,6 +205,40 @@ def call_gemini(prompt: str, system_prompt: str = "", history_turns: List[Dict[s
                 continue
         except Exception:
             continue
+
+    # Respaldo automático ultrarrápido con Groq (Llama 3.3 70B & 3.1 8B)
+    groq_key = os.environ.get("GROQ_API_KEY", "")
+    if groq_key:
+        try:
+            groq_headers = {
+                "Authorization": f"Bearer {groq_key.strip()}",
+                "Content-Type": "application/json"
+            }
+            groq_messages = []
+            if system_prompt:
+                groq_messages.append({"role": "system", "content": system_prompt})
+            for turn in turns_to_include[-8:]:
+                r = "assistant" if turn.get("role") in ["model", "assistant", "blitzo"] else "user"
+                t = turn.get("text", "")
+                if t:
+                    groq_messages.append({"role": r, "content": t})
+            groq_messages.append({"role": "user", "content": prompt or "Hola"})
+
+            for groq_m in ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"]:
+                groq_payload = {
+                    "model": groq_m,
+                    "messages": groq_messages,
+                    "temperature": 0.7,
+                    "max_tokens": 4096
+                }
+                r_groq = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=groq_headers, json=groq_payload, timeout=20)
+                if r_groq.status_code == 200:
+                    data = r_groq.json()
+                    choices = data.get("choices", [])
+                    if choices and "message" in choices[0]:
+                        return choices[0]["message"].get("content", "").strip()
+        except Exception as e:
+            print(f"⚠️ Error en respaldo Groq cloud: {e}")
 
     return "Blitzo: Conexión con IA establecida pero la API está temporalmente ocupada. Intenta de nuevo en unos segundos."
 
@@ -358,20 +404,26 @@ class CloudBlitzoHandler(BaseHTTPRequestHandler):
             msg = req_data.get("message", "").strip()
             mode = req_data.get("mode", "normal")
             custom_prompt = req_data.get("system_prompt", "")
+            file_data = req_data.get("file_data")
+            mime_type = req_data.get("mime_type")
+            file_name = req_data.get("file_name", "")
 
-            if not msg:
-                self._send_json({"reply": "No se recibió ningún mensaje."}, status=400)
+            if not msg and not file_data:
+                self._send_json({"reply": "No se recibió ningún mensaje ni archivo."}, status=400)
                 return
 
             if mode == "sanctuary":
                 system_prompt = custom_prompt or build_sanctuary_system_prompt()
                 with sanctuary_lock:
                     s_log = load_sanctuary_log()
-                    reply = call_gemini(msg, system_prompt=system_prompt, history_turns=s_log[-8:])
+                    reply = call_gemini(msg, system_prompt=system_prompt, history_turns=s_log[-8:], file_data=file_data, mime_type=mime_type)
                     
                     # Registrar en log del Santuario
                     now_iso = datetime.datetime.now().isoformat()
-                    s_log.append({"role": "user", "text": msg, "timestamp": now_iso})
+                    user_entry = {"role": "user", "text": msg, "timestamp": now_iso}
+                    if file_name:
+                        user_entry["fileName"] = file_name
+                    s_log.append(user_entry)
                     s_log.append({"role": "model", "text": reply, "timestamp": now_iso})
                     save_sanctuary_log(s_log)
 
@@ -384,8 +436,11 @@ class CloudBlitzoHandler(BaseHTTPRequestHandler):
                     f"Estás corriendo 24/7 en la nube. Tono directo, coloquial, inteligente, con humor sutil "
                     f"y total lealtad a {USER_NAME}. Respondé de forma ágil, natural y útil."
                 )
-                reply = call_gemini(msg, system_prompt=system_prompt, history_turns=chat_history[-6:])
-                chat_history.append({"role": "user", "text": msg})
+                reply = call_gemini(msg, system_prompt=system_prompt, history_turns=chat_history[-6:], file_data=file_data, mime_type=mime_type)
+                user_entry = {"role": "user", "text": msg}
+                if file_name:
+                    user_entry["fileName"] = file_name
+                chat_history.append(user_entry)
                 chat_history.append({"role": "model", "text": reply})
                 self._send_json({"reply": reply})
 
